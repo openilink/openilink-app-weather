@@ -128,8 +128,20 @@ export async function handleWebhook(
 
         if (raceResult !== TIMEOUT_SENTINEL) {
           // 在截止时间内拿到结果，同步回复
-          res.writeHead(200, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ reply: raceResult }));
+          if (typeof raceResult === "string") {
+            jsonReply(res, 200, { reply: raceResult });
+          } else if (raceResult && typeof raceResult === "object") {
+            // ToolResult 对象，展开字段
+            jsonReply(res, 200, {
+              reply: (raceResult as Record<string, unknown>).reply,
+              reply_type: (raceResult as Record<string, unknown>).reply_type,
+              reply_url: (raceResult as Record<string, unknown>).reply_url,
+              reply_base64: (raceResult as Record<string, unknown>).reply_base64,
+              reply_name: (raceResult as Record<string, unknown>).reply_name,
+            });
+          } else {
+            jsonReply(res, 200, { ok: true });
+          }
           return;
         }
 
@@ -169,6 +181,12 @@ export async function handleWebhook(
     res.writeHead(500, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ error: "内部服务器错误" }));
   }
+}
+
+/** 统一 JSON 响应辅助函数 */
+function jsonReply(res: ServerResponse, status: number, body: Record<string, unknown>): void {
+  res.writeHead(status, { "Content-Type": "application/json" });
+  res.end(JSON.stringify(body));
 }
 
 /** 从 IncomingMessage 读取完整请求体（返回 Buffer 以便签名验证） */
