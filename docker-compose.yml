@@ -1,0 +1,19 @@
+version: "3.8"
+
+services:
+  weather:
+    build: .
+    container_name: openilink-app-weather
+    restart: unless-stopped
+    ports:
+      - "8091:8091"
+    environment:
+      - HUB_URL=${HUB_URL}
+      - BASE_URL=${BASE_URL}
+      - DB_PATH=/data/weather.db
+      - PORT=8091
+    volumes:
+      - weather-data:/data
+
+volumes:
+  weather-data:
