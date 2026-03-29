@@ -3,10 +3,11 @@
  *
  * 负责：
  * 1. 接收 Hub 推送的 HTTP POST 请求
- * 2. 验证 HMAC-SHA256 签名
- * 3. 处理 challenge 握手
+ * 2. url_verification 在签名验证之前处理
+ * 3. 验证 HMAC-SHA256 签名（X-Timestamp + X-Signature）
  * 4. 将业务事件分发给注册的回调函数
- * 5. command 事件支持同步/异步超时响应（SYNC_DEADLINE = 2500ms）
+ * 5. command 事件支持同步/异步超时响应（Promise.race 2500ms）
+ * 6. 异步推送: to = data.group?.id ?? data.sender?.id
  */
 
 import { verifySignature } from "../utils/crypto.js";
@@ -18,11 +19,14 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 /** 同步响应截止时间（毫秒） */
 const SYNC_DEADLINE_MS = 2500;
 
-/** 普通事件处理回调（无返回值） */
-export type EventHandler = (event: HubEvent) => Promise<void>;
+/** 超时哨兵值，与 handler 返回 null 区分开 */
+const TIMEOUT_SENTINEL = Symbol("timeout");
 
 /** command 事件处理回调（返回结果文本） */
-export type CommandHandler = (event: HubEvent, installation: Installation) => Promise<string | null>;
+export type CommandHandler = (
+  event: HubEvent,
+  installation: Installation,
+) => Promise<string | null>;
 
 /** 获取 HubClient 实例的工厂函数 */
 export type HubClientFactory = (installation: Installation) => HubClient;
@@ -30,124 +34,149 @@ export type HubClientFactory = (installation: Installation) => HubClient;
 /** Webhook 处理器配置 */
 export interface WebhookOptions {
   store: Store;
-  /** 普通事件回调（message 等） */
-  onEvent?: EventHandler;
   /** command 事件回调，返回工具执行结果 */
-  onCommand?: CommandHandler;
+  onCommand: CommandHandler;
   /** 获取 HubClient 工厂，用于超时后异步回复 */
-  getHubClient?: HubClientFactory;
+  getHubClient: HubClientFactory;
 }
 
-/** 处理 Webhook 请求（/webhook） */
+/**
+ * 处理 Hub Webhook 请求
+ *
+ * 1. 读取并解析 body
+ * 2. url_verification 类型直接返回 challenge（在签名验证之前）
+ * 3. 查找对应 installation，验证签名（X-Timestamp + X-Signature）
+ * 4. command 事件使用 Promise.race 2500ms 做同步/异步超时控制
+ * 5. 异步推送使用 sendText，to = data.group?.id ?? data.sender?.id
+ */
 export async function handleWebhook(
   req: IncomingMessage,
   res: ServerResponse,
   opts: WebhookOptions,
 ): Promise<void> {
-  if (req.method !== "POST") {
-    res.writeHead(405, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "仅支持 POST 请求" }));
-    return;
-  }
-
-  const body = await readBody(req);
-  if (!body) {
-    res.writeHead(400, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "请求体为空" }));
-    return;
-  }
-
-  let event: HubEvent;
   try {
-    event = JSON.parse(body) as HubEvent;
-  } catch {
-    res.writeHead(400, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "JSON 解析失败" }));
-    return;
-  }
+    // 读取请求体（保留 Buffer 用于签名验证）
+    const bodyBuf = await readBody(req);
+    let event: HubEvent;
 
-  const installation = opts.store.getInstallation(event.installation_id);
-  if (!installation) {
-    console.warn("[webhook] 未知安装实例:", event.installation_id);
-    res.writeHead(404, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "未知的安装实例" }));
-    return;
-  }
+    try {
+      event = JSON.parse(bodyBuf.toString("utf-8")) as HubEvent;
+    } catch {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "请求体 JSON 解析失败" }));
+      return;
+    }
 
-  const signature = req.headers["x-hub-signature"] as string | undefined;
-  if (!signature || !verifySignature(body, signature, installation.webhookSecret)) {
-    console.warn("[webhook] 签名验证失败:", event.installation_id);
-    res.writeHead(401, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: "签名验证失败" }));
-    return;
-  }
+    // url_verification 在签名验证之前处理
+    if (event.type === "url_verification") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ challenge: event.challenge ?? "" }));
+      return;
+    }
 
-  if (event.type === "challenge" && event.challenge) {
-    console.log("[webhook] 握手成功:", event.installation_id);
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ challenge: event.challenge }));
-    return;
-  }
+    // 查找安装记录
+    const installationId = event.installation_id;
+    if (!installationId) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "缺少 installation_id" }));
+      return;
+    }
 
-  // 分发业务事件
-  if (event.type === "event") {
-    const subType = event.event?.type;
+    const installation = opts.store.getInstallation(installationId);
+    if (!installation) {
+      console.warn("[webhook] 未找到安装记录:", installationId);
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "安装记录不存在" }));
+      return;
+    }
 
-    // command 事件：同步/异步超时处理
-    if (subType === "command" && opts.onCommand) {
-      const resultPromise = opts.onCommand(event, installation);
-      const timeoutPromise = new Promise<null>((resolve) =>
-        setTimeout(() => resolve(null), SYNC_DEADLINE_MS),
-      );
-      const result = await Promise.race([resultPromise, timeoutPromise]);
+    // 验证签名: X-Timestamp + X-Signature
+    const timestamp = (req.headers["x-timestamp"] as string) ?? "";
+    const signature = (req.headers["x-signature"] as string) ?? "";
 
-      if (result !== null) {
-        // 在截止时间内拿到结果，同步返回
+    if (!timestamp || !signature) {
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "缺少签名头: X-Timestamp, X-Signature" }));
+      return;
+    }
+
+    const valid = verifySignature(
+      installation.webhookSecret,
+      timestamp,
+      bodyBuf,
+      signature,
+    );
+
+    if (!valid) {
+      console.warn("[webhook] 签名验证失败, installation_id:", installationId);
+      res.writeHead(401, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "签名验证失败" }));
+      return;
+    }
+
+    // 分发业务事件
+    if (event.event) {
+      const eventType = event.event.type;
+
+      if (eventType === "command") {
+        // command 事件：Promise.race 2500ms 同步/异步超时处理
+        const resultPromise = opts.onCommand(event, installation);
+        const timeoutPromise = new Promise<typeof TIMEOUT_SENTINEL>((resolve) =>
+          setTimeout(() => resolve(TIMEOUT_SENTINEL), SYNC_DEADLINE_MS),
+        );
+        const raceResult = await Promise.race([resultPromise, timeoutPromise]);
+
+        if (raceResult !== TIMEOUT_SENTINEL) {
+          // 在截止时间内拿到结果，同步回复
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ reply: raceResult }));
+          return;
+        }
+
+        // 超时，先返回 reply_async，再异步推送结果
         res.writeHead(200, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ reply: result }));
-        return;
-      }
+        res.end(JSON.stringify({ reply_async: true }));
 
-      // 超时，异步回复：使用 replyToolResult 将结果关联到原始 command 请求
-      if (opts.getHubClient) {
+        // 异步推送: to = data.group?.id ?? data.sender?.id
         const hubClient = opts.getHubClient(installation);
         resultPromise
           .then(async (asyncResult) => {
             if (asyncResult) {
-              await hubClient.replyToolResult(event.trace_id, asyncResult);
+              const data = event.event?.data;
+              const to =
+                (data?.group as { id: string } | undefined)?.id ??
+                (data?.sender as { id: string } | undefined)?.id ??
+                "";
+              if (to) {
+                try {
+                  await hubClient.sendText(to, asyncResult, event.trace_id);
+                } catch (err) {
+                  console.error("[webhook] 异步推送 command 结果失败:", err);
+                }
+              }
             }
           })
-          .catch((err) => console.error("[webhook] 异步回复 command 失败:", err));
-      }
-
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ reply_async: true }));
-      return;
-    }
-
-    // 其他事件：原有逻辑
-    if (opts.onEvent) {
-      try {
-        await opts.onEvent(event);
-      } catch (err) {
-        console.error("[webhook] 事件处理失败:", err);
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ error: "事件处理失败" }));
+          .catch((err) => console.error("[webhook] 异步推送 command 结果失败:", err));
         return;
       }
     }
-  }
 
-  res.writeHead(200, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ ok: true }));
+    // 返回成功
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ status: "ok" }));
+  } catch (err) {
+    console.error("[webhook] 请求处理异常:", err);
+    res.writeHead(500, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "内部服务器错误" }));
+  }
 }
 
-/** 从 IncomingMessage 读取完整请求体 */
-function readBody(req: IncomingMessage): Promise<string> {
+/** 从 IncomingMessage 读取完整请求体（返回 Buffer 以便签名验证） */
+function readBody(req: IncomingMessage): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     req.on("data", (chunk: Buffer) => chunks.push(chunk));
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
+    req.on("end", () => resolve(Buffer.concat(chunks)));
     req.on("error", reject);
   });
 }

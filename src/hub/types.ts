@@ -5,12 +5,12 @@
 /** Hub 推送的事件结构 */
 export interface HubEvent {
   /** 协议版本 */
-  v: string;
-  /** 事件类型：event / challenge / install */
-  type: string;
+  v: number;
+  /** 事件类型：event / url_verification */
+  type: "event" | "url_verification";
   /** 链路追踪 ID */
   trace_id: string;
-  /** 握手挑战值（type=challenge 时存在） */
+  /** 握手挑战值（type=url_verification 时存在） */
   challenge?: string;
   /** 安装实例 ID */
   installation_id: string;
@@ -25,10 +25,36 @@ export interface HubEvent {
     /** 事件唯一 ID */
     id: string;
     /** 事件发生时间戳 */
-    timestamp: string;
+    timestamp: number;
     /** 事件数据 */
-    data: Record<string, unknown>;
+    data: EventData;
   };
+}
+
+/** 事件数据 */
+export interface EventData {
+  /** 发送者信息 */
+  sender?: { id: string; name?: string };
+  /** 群组信息 */
+  group?: { id: string; name?: string };
+  /** 命令名称（command 事件） */
+  command?: string;
+  /** 命令参数（command 事件） */
+  args?: Record<string, unknown>;
+  /** 其他扩展字段 */
+  [key: string]: unknown;
+}
+
+/** OAuth 凭证交换响应 */
+export interface OAuthExchangeResult {
+  /** 安装实例 ID */
+  installation_id: string;
+  /** 应用访问令牌 */
+  app_token: string;
+  /** Webhook 签名密钥 */
+  webhook_secret: string;
+  /** Bot ID */
+  bot_id: string;
 }
 
 /** 安装实例记录 */

@@ -23,7 +23,6 @@ export interface RouterOptions {
  * 1. 接收 Hub 推送的 command 类型事件
  * 2. 解析 command 名称，匹配对应的 ToolHandler
  * 3. 构建 ToolContext 并执行 handler
- * 4. 通过 HubClient 回传执行结果
  */
 export class Router {
   private definitions: ToolDefinition[];
@@ -56,10 +55,11 @@ export class Router {
       return `未知命令：${command}。可用命令：${this.definitions.map((d) => d.command).join("、")}`;
     }
 
+    // 构建执行上下文: userId 从 sender.id 取得
     const ctx: ToolContext = {
       installationId: event.installation_id,
       botId: event.bot.id,
-      userId: (eventData.user_id as string) || "",
+      userId: eventData.sender?.id ?? "",
       traceId: event.trace_id,
       args,
     };
@@ -73,15 +73,20 @@ export class Router {
     }
   }
 
-  /** 完整处理流程：执行命令并通过 HubClient 回传结果 */
+  /** 完整处理流程：执行命令并通过 HubClient 异步推送结果 */
   async handleAndReply(event: HubEvent, hubClient: HubClient): Promise<void> {
     const result = await this.handleCommand(event);
     if (result === undefined) return;
 
-    try {
-      await hubClient.replyToolResult(event.trace_id, result);
-    } catch (err) {
-      console.error("[Router] 回传工具结果失败:", err);
+    // 异步推送: to = data.group?.id ?? data.sender?.id
+    const data = event.event?.data;
+    const to = data?.group?.id ?? data?.sender?.id ?? "";
+    if (to) {
+      try {
+        await hubClient.sendText(to, result, event.trace_id);
+      } catch (err) {
+        console.error("[Router] 回传工具结果失败:", err);
+      }
     }
   }
 }
