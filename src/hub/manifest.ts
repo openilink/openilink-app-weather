@@ -16,6 +16,10 @@ export interface AppManifest {
   description: string;
   /** 订阅的事件类型列表 */
   events: string[];
+  /** 配置表单 JSON Schema */
+  config_schema?: Record<string, unknown>;
+  /** 安装引导说明（Markdown） */
+  guide?: string;
 }
 
 /** 天气查询应用清单 */
@@ -25,4 +29,6 @@ export const manifest: AppManifest = {
   icon: "🌤️",
   description: "查询全球天气信息，支持按城市名或经纬度查询当前天气、未来预报和空气质量",
   events: ["command"],
+  config_schema: { type: "object", properties: {} },
+  guide: "## 天气查询\n无需配置，直接安装即可使用。\n\n数据来源：[Open-Meteo](https://open-meteo.com/)（免费开放 API）",
 };
