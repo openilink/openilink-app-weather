@@ -49,6 +49,12 @@ docker-compose up -d
 | `GET` | `/manifest.json` | 返回应用清单 |
 | `GET` | `/health` | 健康检查 |
 
+## 安全与隐私
+
+- **无需 API Key**：本 App 使用免费公开 API，不需要任何认证信息
+- **不存储数据**：纯工具型应用，请求即响应，无任何持久化
+- 如需自部署：`docker compose up -d`
+
 ## License
 
 MIT
