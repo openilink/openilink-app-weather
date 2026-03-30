@@ -46,8 +46,12 @@ const definitions: ToolDefinition[] = [
     description: "根据经纬度查询天气，返回当前温度/天气/风速/湿度 + 未来3天预报",
     command: "get_weather",
     parameters: {
-      latitude: { type: "number", description: "纬度", required: true },
-      longitude: { type: "number", description: "经度", required: true },
+      type: "object",
+      properties: {
+        latitude: { type: "number", description: "纬度" },
+        longitude: { type: "number", description: "经度" },
+      },
+      required: ["latitude", "longitude"],
     },
   },
   {
@@ -55,7 +59,11 @@ const definitions: ToolDefinition[] = [
     description: "按城市名查询天气，自动解析城市经纬度后查询天气信息",
     command: "get_weather_by_city",
     parameters: {
-      city: { type: "string", description: "城市名称（支持中英文）", required: true },
+      type: "object",
+      properties: {
+        city: { type: "string", description: "城市名称（支持中英文）" },
+      },
+      required: ["city"],
     },
   },
   {
@@ -63,8 +71,12 @@ const definitions: ToolDefinition[] = [
     description: "根据经纬度查询空气质量，返回 PM2.5、PM10 和 US AQI 指数",
     command: "get_air_quality",
     parameters: {
-      latitude: { type: "number", description: "纬度", required: true },
-      longitude: { type: "number", description: "经度", required: true },
+      type: "object",
+      properties: {
+        latitude: { type: "number", description: "纬度" },
+        longitude: { type: "number", description: "经度" },
+      },
+      required: ["latitude", "longitude"],
     },
   },
 ];
